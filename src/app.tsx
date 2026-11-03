@@ -121,6 +121,7 @@ const CSS = `
 .tw-ghost { background: ${PAPER} !important; color: ${C.ink} !important; }
 .tw-sub { background: ${g("#FFF8EC", "#F8EDDA")} !important; color: ${C.ink} !important; }
 .tw-input { background: #FFFDF8 !important; color: ${C.ink} !important; }
+@keyframes twSpin { to { transform: rotate(360deg); } }
 @keyframes twFade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 `;
 
@@ -144,6 +145,8 @@ function App() {
   const [sel, setSel] = useState<Record<string, Partial<Record<Opt, Pick>>>>({});
   const [DAYS, setDays] = useState<Day[]>(DEFAULT_DAYS);
   const [updatedNote, setUpdatedNote] = useState<string>("");
+  const [updatedAt, setUpdatedAt] = useState<string>("");
+  const [refreshing, setRefreshing] = useState<boolean>(false);
   const FREE = DAYS.filter((d) => d.free);
   const [consent, setConsent] = useState<string>(() => { try { return localStorage.getItem("taltul_consent") ?? ""; } catch { return ""; } });
   const [consentStep, setConsentStep] = useState<number>(0);
@@ -158,6 +161,7 @@ function App() {
     const load = () => {
       fetch(`data.json?t=${Date.now()}`, { cache: "no-store" }).then((r) => r.json()).then((j: { days?: Day[]; updated?: string }) => {
         if (!j.days) return;
+        if (j.updated) setUpdatedAt(j.updated);
         const sig = JSON.stringify(j.days);
         if (sig === last) return;
         if (last) setUpdatedNote("טל עדכנה את הלו״ז ✨ תבדוק שהבחירות שלך עדיין מתאימות");
@@ -236,6 +240,20 @@ function App() {
     if (s2) setSub((cur: Sub | null) => (!cur || (s2 as Sub).at >= cur.at ? s2 : cur));
     if (Object.keys(d2).length) setDec((cur: Record<string, Decision>) => { const n = { ...cur }; Object.values(d2).forEach((v: Decision) => { if (!n[v.key] || n[v.key].at <= v.at) n[v.key] = v; }); return n; });
   };
+  const refreshNow = async () => {
+    setRefreshing(true);
+    try {
+      const r = await fetch(`data.json?t=${Date.now()}`, { cache: "no-store" });
+      const j = await r.json() as { days?: Day[]; updated?: string };
+      if (j.days) setDays(j.days);
+      if (j.updated) setUpdatedAt(j.updated);
+      if (TOK) applyMsgs([...(await pollAll(topicI)), ...(await pollAll(topicT))]);
+      setUpdatedNote("");
+      setToast("הלו״ז מעודכן ✨");
+    } catch { setToast("לא הצלחתי לעדכן, נסה שוב בעוד רגע"); }
+    setTimeout(() => setRefreshing(false), 600);
+  };
+  const updatedLabel = updatedAt ? new Date(updatedAt).toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem", hour: "2-digit", minute: "2-digit" }) : "";
   useEffect(() => {
     if (!TOK) return;
     let alive = true;
@@ -349,6 +367,10 @@ function App() {
         ) : null}
         {consent === "later" ? <button className="tw-ghost" onClick={() => { saveConsent(""); setConsentStep(1); }} style={{ ...reset, fontSize: 16, fontWeight: 600, minHeight: 48, borderRadius: 9999, border: `1px solid ${C.line}`, backgroundImage: PAPER, color: C.ink }}>🔔 חיבור יומן ותזכורת שבועית</button> : null}
 
+        <button className="tw-ghost" onClick={() => { void refreshNow(); }} disabled={refreshing} style={{ ...reset, fontSize: 17, fontWeight: 700, minHeight: 52, borderRadius: 9999, border: `1.5px solid ${C.gold}`, backgroundImage: PAPER, color: C.wine, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          <span style={{ display: "inline-block", animation: refreshing ? "twSpin .8s linear infinite" : "none" }}>🔄</span> {refreshing ? "מעדכן..." : "עדכון לו״ז"}
+        </button>
+        {updatedLabel ? <div style={{ fontSize: 14, color: C.muted, textAlign: "center", marginTop: -12 }}>עודכן לאחרונה ב-{updatedLabel}</div> : null}
         <button className="tw-ghost" onClick={openHome} style={{ ...reset, fontSize: 16, fontWeight: 600, minHeight: 48, borderRadius: 9999, border: `1px solid ${C.line}`, backgroundImage: PAPER, color: C.ink }}>📲 הוספה למסך הבית</button>
         {showHome ? (
           <div className="tw-card" role="dialog" style={{ ...card, padding: 22, display: "flex", flexDirection: "column", gap: 10 }}>
