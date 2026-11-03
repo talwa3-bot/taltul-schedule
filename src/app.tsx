@@ -47,7 +47,7 @@ const fmt = (x: number) => `${Math.floor(x / 60)}:${x % 60 === 0 ? "00" : "30"}`
 const slots = (from: number, to: number): string[] => { const out: string[] = []; for (let x = Math.ceil(from / 30) * 30; x <= to; x += 30) out.push(fmt(x)); return out; };
 
 type Day = { id: string; day: string; date: string; free: boolean; weekend: boolean; when: string; line: string; windows: [string, string][] };
-const DAYS: Day[] = [
+const DEFAULT_DAYS: Day[] = [
   { id: "tue", day: "שלישי", date: "3.11", free: true, weekend: false, when: "מ-20:00", line: "הערב. כן, כבר היום. תפתיע אותי", windows: [["20:00", "22:30"]] },
   { id: "wed", day: "רביעי", date: "4.11", free: true, weekend: false, when: "מ-22:00", line: "משבצת לילה מאוחרת, אחרי הבנות", windows: [["22:00", "23:00"]] },
   { id: "thu", day: "חמישי", date: "5.11", free: true, weekend: false, when: "מ-22:00", line: "חמישי בלילה, משבצת לילה מאוחרת. נו באמת, מה עוד צריך", windows: [["22:00", "23:00"]] },
@@ -56,7 +56,7 @@ const DAYS: Day[] = [
   { id: "sun", day: "ראשון", date: "8.11", free: false, weekend: false, when: "", line: "לומדת עד הלילה. חנונית אבל חמודה 📚", windows: [] },
   { id: "mon", day: "שני", date: "9.11", free: false, weekend: false, when: "", line: "עסוקה עד מאוחר, אוספת השראה 🎤", windows: [] },
 ];
-const FREE = DAYS.filter((d) => d.free);
+
 const isSleepOpt = (o: Opt) => o === "mine" || o === "his" || o === "sleep";
 const timesFor = (d: Day, o: Opt): string[] => {
   if (!d.weekend) return d.windows.flatMap(([a, b]) => slots(toMin(a), toMin(b)));
@@ -65,11 +65,17 @@ const timesFor = (d: Day, o: Opt): string[] => {
 };
 const pad = (n: number) => String(n).padStart(2, "0");
 const stamp = (dt: Date) => `${dt.getUTCFullYear()}${pad(dt.getUTCMonth() + 1)}${pad(dt.getUTCDate())}T${pad(dt.getUTCHours())}${pad(dt.getUTCMinutes())}00`;
+const yearFor = (mm: number) => { const n = new Date(); return mm < n.getMonth() + 1 - 6 ? n.getFullYear() + 1 : n.getFullYear(); };
+const ics1 = (uid: string, start: string, end: string, title: string, desc: string, extra: string[] = []) => ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Taltul//HE", "BEGIN:VEVENT", `UID:${uid}@taltul`, `DTSTAMP:${start}`, `DTSTART;TZID=Asia/Jerusalem:${start}`, `DTEND;TZID=Asia/Jerusalem:${end}`, `SUMMARY:${title}`, `DESCRIPTION:${desc}`, ...extra, "END:VEVENT", "END:VCALENDAR"].join("\r\n");
+const gcal = (title: string, start: string, end: string, desc: string, recur = "") => `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&dates=${start}/${end}&ctz=Asia/Jerusalem&details=${encodeURIComponent(desc)}${recur ? `&recur=${encodeURIComponent(recur)}` : ""}`;
+const PAGE_URL = "https://talwa3-bot.github.io/taltul-schedule/";
+const REMINDER_G = gcal("הזנת שעות טלטול השבוע? 💌", "20261107T210000", "20261107T211500", `נכנסים ובוחרים: ${PAGE_URL}`, "RRULE:FREQ=WEEKLY;BYDAY=SA");
+const REMINDER_ICS = PAGE_URL + "reminder.ics";
 const calTimes = (date: string, tm: string, o: Opt) => {
   const [dd, mm] = date.split(".").map(Number);
   const [h, m] = tm.split(":").map(Number);
-  const s = new Date(Date.UTC(2026, mm - 1, dd, h, m));
-  const e = isSleepOpt(o) ? new Date(Date.UTC(2026, mm - 1, dd + 1, 8, 0)) : new Date(s.getTime() + OPTS[o].dur * 60000);
+  const s = new Date(Date.UTC(yearFor(mm), mm - 1, dd, h, m));
+  const e = isSleepOpt(o) ? new Date(Date.UTC(yearFor(mm), mm - 1, dd + 1, 8, 0)) : new Date(s.getTime() + OPTS[o].dur * 60000);
   return { start: stamp(s), end: stamp(e) };
 };
 const titleFor = (o: Opt, p: Pick) => {
@@ -121,6 +127,34 @@ const CSS = `
 function App() {
   const sans = "system-ui, -apple-system, 'Segoe UI', Arial, sans-serif";
   const [sel, setSel] = useState<Record<string, Partial<Record<Opt, Pick>>>>({});
+  const [DAYS, setDays] = useState<Day[]>(DEFAULT_DAYS);
+  const [updatedNote, setUpdatedNote] = useState<string>("");
+  const FREE = DAYS.filter((d) => d.free);
+  const [consent, setConsent] = useState<string>(() => { try { return localStorage.getItem("taltul_consent") ?? ""; } catch { return ""; } });
+  const [consentStep, setConsentStep] = useState<number>(0);
+  const [specials, setSpecials] = useState<{ date: string; time: string; text: string }[]>([]);
+  const [spOpen, setSpOpen] = useState<boolean>(false);
+  const [spDate, setSpDate] = useState<string>("");
+  const [spTime, setSpTime] = useState<string>("");
+  const [spText, setSpText] = useState<string>("");
+  const saveConsent = (v: string) => { try { localStorage.setItem("taltul_consent", v); } catch { /* ignore */ } setConsent(v); };
+  useEffect(() => {
+    let last = "";
+    const load = () => {
+      fetch(`data.json?t=${Date.now()}`, { cache: "no-store" }).then((r) => r.json()).then((j: { days?: Day[]; updated?: string }) => {
+        if (!j.days) return;
+        const sig = JSON.stringify(j.days);
+        if (sig === last) return;
+        if (last) setUpdatedNote("טל עדכנה את הלו״ז ✨ תבדוק שהבחירות שלך עדיין מתאימות");
+        last = sig; setDays(j.days);
+      }).catch(() => { /* keep current */ });
+    };
+    load();
+    const onVis = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onVis); window.addEventListener("focus", load);
+    const id = setInterval(load, 5 * 60000);
+    return () => { document.removeEventListener("visibilitychange", onVis); window.removeEventListener("focus", load); clearInterval(id); };
+  }, []);
   const [seed, setSeed] = useState<number>(() => Math.floor(Math.random() * 1000));
   const [copied, setCopied] = useState<boolean>(false);
   const [toast, setToast] = useState<string>("");
@@ -165,7 +199,8 @@ function App() {
 
   const picked = (d: Day) => (Object.keys(sel[d.id] ?? {}) as Opt[]);
   const count = FREE.filter((d) => picked(d).length > 0).length;
-  const lines = FREE.flatMap((d) => picked(d).map((o) => lineFor(d, o, (sel[d.id] ?? {})[o] ?? {})));
+  const spLine = (x: { date: string; time: string; text: string }) => { const [y, m, dd] = x.date.split("-"); return `⭐ אירוע מיוחד – ${x.text}, ${Number(dd)}.${Number(m)}.${y}${x.time ? `, ב-${x.time}` : ""}`; };
+  const lines = [...FREE.flatMap((d) => picked(d).map((o) => lineFor(d, o, (sel[d.id] ?? {})[o] ?? {}))), ...specials.map(spLine)];
   const message = `טל, שיבצתי את עצמי 😎\n${lines.join("\n")}\nשלחתי לך לאישור, תעדכני אותי 😉`;
   const waUrl = `https://wa.me/?text=${encodeURIComponent(message)}`;
   const copy = () => { try { void navigator.clipboard.writeText(message); setCopied(true); setSent(true); } catch { setCopied(false); } };
@@ -191,6 +226,33 @@ function App() {
           <div style={{ fontSize: 16, lineHeight: "26px", color: C.ink, marginTop: 10 }}>1. בוחרים מה בא לך · 2. שולחים לי · 3. אני מאשרת, ורק אז זה סגור</div>
           <div style={{ fontFamily: SERIF, fontSize: 18, fontStyle: "italic", color: C.muted, marginTop: 10 }}>״{QUIPS[(seed * 7) % QUIPS.length]}״</div>
         </div>
+
+        {updatedNote ? <div className="tw-card" style={{ ...card, padding: 14, textAlign: "center", fontWeight: 700, color: C.wine }}>{updatedNote}</div> : null}
+        {consent !== "yes" && consent !== "later" ? (
+          <div role="dialog" style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(43,35,38,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+            <div className="tw-card" dir="rtl" style={{ ...card, maxWidth: 460, width: "100%", padding: 24, display: "flex", flexDirection: "column", gap: 14, textAlign: "right" }}>
+              <div style={{ fontSize: 40, textAlign: "center" }}>🔔</div>
+              <div style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 800, color: C.wine, textAlign: "center" }}>רגע לפני שמתחילים</div>
+              <div style={{ fontSize: 17, lineHeight: "27px", color: C.ink }}>אפשר לחבר את היומן שלך כדי לשריין בו את מה שתבחר, ולקבל כל שבת ב-21:00 תזכורת קטנה.</div>
+              <div style={{ fontSize: 17, lineHeight: "27px", fontWeight: 700, color: C.ink, backgroundImage: GOLDG, border: `1px solid ${C.gold}`, borderRadius: 14, padding: 12 }}>הפרטים שלך לא הולכים לצאת לשום מקום, זה רק כדי לשריין ביומן.</div>
+              <div style={{ fontSize: 15, lineHeight: "24px", color: C.muted }}>טל לא רואה ולא לוקחת שום מידע מהיומן שלך. החיבור רק מוסיף אירועים ותזכורות ליומן שלך, ואתה מאשר כל אחד מהם בעצמך.</div>
+              {consentStep === 0 ? (
+                <div style={{ display: "grid", gap: 10 }}>
+                  <button className="tw-chip on" onClick={() => setConsentStep(1)} style={chip(true)}>✅ מאשר ומחבר ליומן</button>
+                  <button className="tw-chip" onClick={() => saveConsent("later")} style={chip(false)}>אחר כך</button>
+                </div>
+              ) : (
+                <div style={{ display: "grid", gap: 10 }}>
+                  <div style={label}>בחר את היומן שלך, ואשר את התזכורת השבועית:</div>
+                  <a href={REMINDER_G} target="_blank" rel="noopener noreferrer" onClick={() => saveConsent("yes")} style={ls}>Google Calendar</a>
+                  <a href={REMINDER_ICS} onClick={() => saveConsent("yes")} style={ls}>אייפון / Apple Calendar</a>
+                  <button className="tw-chip" onClick={() => saveConsent("yes")} style={chip(false)}>סיימתי</button>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : null}
+        {consent === "later" ? <button className="tw-ghost" onClick={() => { saveConsent(""); setConsentStep(1); }} style={{ ...reset, fontSize: 16, fontWeight: 600, minHeight: 48, borderRadius: 9999, border: `1px solid ${C.line}`, backgroundImage: PAPER, color: C.ink }}>🔔 חיבור יומן ותזכורת שבועית</button> : null}
 
         <button className="tw-ghost" onClick={openHome} style={{ ...reset, fontSize: 16, fontWeight: 600, minHeight: 48, borderRadius: 9999, border: `1px solid ${C.line}`, backgroundImage: PAPER, color: C.ink }}>📲 הוספה למסך הבית</button>
         {showHome ? (
@@ -289,6 +351,11 @@ function App() {
                       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
                         {tms.map((tm) => { const on = p.time === tm; return <button key={tm} className={on ? "tw-chip on" : "tw-chip"} onClick={() => update(d, o, { time: on ? undefined : tm })} style={chip(on)}>{tm}</button>; })}
                       </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 15, color: C.muted }}>או שעה משלך:</span>
+                        <input className="tw-input" type="time" value={p.time ?? ""} onChange={(e: { target: { value: string } }) => update(d, o, { time: e.target.value || undefined })}
+                          style={{ fontFamily: sans, fontSize: 17, minHeight: 46, borderRadius: 12, border: `1.5px solid ${C.gold}`, background: "#FFFDF8", color: C.ink, padding: "6px 10px" }} />
+                      </div>
                     </div>
                     {cal ? (
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -305,6 +372,40 @@ function App() {
             </div>
           );
         })}
+
+        <div className="tw-card" style={{ ...card, padding: "22px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <button className={spOpen ? "tw-tile on" : "tw-tile"} onClick={() => setSpOpen(!spOpen)} style={{ ...reset, minHeight: 64, borderRadius: 18, border: `1.5px solid ${C.wine}`, backgroundImage: spOpen ? WINE : PAPER, color: spOpen ? C.white : C.wine, fontSize: 19, fontWeight: 800 }}>⭐ אירוע מיוחד</button>
+          <div style={{ fontSize: 15, color: C.muted }}>הופעה, חתונה, טיסה? משהו קדימה שלא קשור לשבוע הזה.</div>
+          {spOpen ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={label}>מה עושים?</div>
+              <input className="tw-input" type="text" value={spText} maxLength={60} placeholder="למשל: הופעה של עומר אדם" onChange={(e: { target: { value: string } }) => setSpText(e.target.value)} style={{ fontFamily: sans, fontSize: 17, minHeight: 50, borderRadius: 14, border: `1.5px solid ${C.gold}`, background: "#FFFDF8", color: C.ink, padding: "8px 14px" }} />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><div style={label}>תאריך</div><input className="tw-input" type="date" value={spDate} onChange={(e: { target: { value: string } }) => setSpDate(e.target.value)} style={{ fontFamily: sans, fontSize: 17, minHeight: 48, borderRadius: 12, border: `1.5px solid ${C.gold}`, background: "#FFFDF8", color: C.ink, padding: "6px 8px" }} /></div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}><div style={label}>שעה</div><input className="tw-input" type="time" value={spTime} onChange={(e: { target: { value: string } }) => setSpTime(e.target.value)} style={{ fontFamily: sans, fontSize: 17, minHeight: 48, borderRadius: 12, border: `1.5px solid ${C.gold}`, background: "#FFFDF8", color: C.ink, padding: "6px 8px" }} /></div>
+              </div>
+              <button className="tw-chip on" disabled={!spText || !spDate} onClick={() => { setSpecials([...specials, { date: spDate, time: spTime, text: spText }]); setSpText(""); setSpDate(""); setSpTime(""); setSpOpen(false); setToast("וואו, מתכנן קדימה! 🎟️"); }} style={{ ...chip(true), opacity: !spText || !spDate ? 0.5 : 1 }}>הוסף להזמנה</button>
+            </div>
+          ) : null}
+          {specials.map((x, i) => {
+            const [y, m, dd] = x.date.split("-").map(Number);
+            const [h, mi] = (x.time || "19:00").split(":").map(Number);
+            const st = new Date(Date.UTC(y, m - 1, dd, h, mi)); const en = new Date(st.getTime() + 3 * 3600000);
+            const title = `${x.text} – טל ועידן`; const desc = "ממתין לאישור של טל";
+            const icsU = `data:text/calendar;charset=utf-8,${encodeURIComponent(ics1(`sp${i}-${stamp(st)}`, stamp(st), stamp(en), title, desc))}`;
+            return (
+              <div key={i} className="tw-sub" style={{ backgroundImage: g("#FFF8EC", "#F8EDDA"), color: C.ink, borderRadius: 18, border: `1px solid ${C.line}`, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 17, fontWeight: 700, color: C.wine }}>{spLine(x)}</div>
+                <div style={label}>📅 הוספה ליומן (ממתין לאישור של טל)</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <a href={gcal(title, stamp(st), stamp(en), desc)} target="_blank" rel="noopener noreferrer" style={ls}>Google Calendar</a>
+                  <a href={icsU} download={`taltul-special-${i}.ics`} style={ls}>אייפון / אחר</a>
+                </div>
+                <button className="tw-chip" onClick={() => setSpecials(specials.filter((_, j) => j !== i))} style={chip(false)}>הסר</button>
+              </div>
+            );
+          })}
+        </div>
 
         <div className="tw-card" style={{ ...card, padding: "24px 20px", display: "flex", flexDirection: "column", gap: 16, border: `1px solid ${C.gold}` }}>
           <div style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 700, color: C.wine }}>ההזמנה שלך {count >= 2 ? "🔥" : count === 1 ? "👏" : ""}</div>
