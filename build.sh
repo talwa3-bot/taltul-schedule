@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")"
 python3 -c "import json;json.load(open('data.json'))"   # validate
 if [ "$1" != "data" ]; then
-  (cd src && npx esbuild app.tsx --bundle --minify --jsx=automatic --define:process.env.NODE_ENV='"production"' --outfile=app.js)
+  (cd src && npx esbuild app.tsx --bundle --minify --charset=utf8 --jsx=automatic --define:process.env.NODE_ENV='"production"' --outfile=app.js)
   python3 build.py
 fi
 git add -A

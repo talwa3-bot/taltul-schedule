@@ -124,6 +124,21 @@ const CSS = `
 @keyframes twFade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 `;
 
+
+const NTFY = "https://ntfy.sh/";
+const ADMIN_HASH = "b990d1b2f122ca5f2be2e638e1736fc5dd87be42703533bcff73be2b5d9bfa1b";
+type Item = { key: string; line: string };
+type Decision = { key: string; status: "approved" | "rejected" | "counter" | "time"; time?: string; note?: string; at: number };
+type Sub = { items: Item[]; at: number };
+const sha = async (t: string) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t)))).map((b) => b.toString(16).padStart(2, "0")).join("");
+const hashParams = () => new URLSearchParams((typeof location !== "undefined" ? location.hash : "").replace(/^#/, ""));
+const pub = (topic: string, body: unknown) => fetch(NTFY + topic, { method: "POST", body: JSON.stringify(body) }).catch(() => undefined);
+const pollAll = async (topic: string): Promise<unknown[]> => {
+  try { const r = await fetch(`${NTFY}${topic}/json?poll=1&since=all`, { cache: "no-store" }); const t = await r.text();
+    return t.split("\n").filter(Boolean).map((l) => { try { const m = JSON.parse(l) as { event?: string; message?: string }; return m.event === "message" && m.message ? JSON.parse(m.message) : null; } catch { return null; } }).filter(Boolean); } catch { return []; }
+};
+const STATUS_TXT: Record<string, string> = { pending: "⏳ ממתין לאישור של טל", approved: "✅ טל אישרה", rejected: "❌ לא מתאים הפעם", counter: "🔄 טל מציעה משהו אחר", time: "🕗 טל שינתה שעה" };
+
 function App() {
   const sans = "system-ui, -apple-system, 'Segoe UI', Arial, sans-serif";
   const [sel, setSel] = useState<Record<string, Partial<Record<Opt, Pick>>>>({});
@@ -201,9 +216,54 @@ function App() {
   const count = FREE.filter((d) => picked(d).length > 0).length;
   const spLine = (x: { date: string; time: string; text: string }) => { const [y, m, dd] = x.date.split("-"); return `⭐ אירוע מיוחד – ${x.text}, ${Number(dd)}.${Number(m)}.${y}${x.time ? `, ב-${x.time}` : ""}`; };
   const lines = [...FREE.flatMap((d) => picked(d).map((o) => lineFor(d, o, (sel[d.id] ?? {})[o] ?? {}))), ...specials.map(spLine)];
+
+  const hp = hashParams();
+  const TOK = hp.get("k") ?? "";
+  const ADM = hp.get("a") ?? "";
+  const topicI = `taltul-${TOK}-i`, topicT = `taltul-${TOK}-t`;
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [sub, setSub] = useState<Sub | null>(() => { try { const v = localStorage.getItem("taltul_sub_" + TOK); return v ? JSON.parse(v) as Sub : null; } catch { return null; } });
+  const [dec, setDec] = useState<Record<string, Decision>>(() => { try { const v = localStorage.getItem("taltul_dec_" + TOK); return v ? JSON.parse(v) as Record<string, Decision> : {}; } catch { return {}; } });
+  const [live, setLive] = useState<string>("");
+  const [edit, setEdit] = useState<Record<string, { time: string; note: string }>>({});
+  useEffect(() => { try { if (sub) localStorage.setItem("taltul_sub_" + TOK, JSON.stringify(sub)); localStorage.setItem("taltul_dec_" + TOK, JSON.stringify(dec)); } catch { /* ignore */ } }, [sub, dec]);
+  const applyMsgs = (msgs: unknown[]) => {
+    let s2: Sub | null = null; const d2: Record<string, Decision> = {};
+    msgs.forEach((m: unknown) => { const x = m as { type?: string; sub?: Sub; dec?: Decision; all?: Record<string, Decision> };
+      if (x.type === "submit" && x.sub) s2 = x.sub;
+      if (x.type === "decision" && x.dec) d2[x.dec.key] = x.dec;
+      if (x.type === "snapshot" && x.all) Object.assign(d2, x.all); });
+    if (s2) setSub((cur: Sub | null) => (!cur || (s2 as Sub).at >= cur.at ? s2 : cur));
+    if (Object.keys(d2).length) setDec((cur: Record<string, Decision>) => { const n = { ...cur }; Object.values(d2).forEach((v: Decision) => { if (!n[v.key] || n[v.key].at <= v.at) n[v.key] = v; }); return n; });
+  };
+  useEffect(() => {
+    if (!TOK) return;
+    let alive = true;
+    (async () => {
+      const admin = !!ADM && (await sha(ADM)) === ADMIN_HASH; if (!alive) return; setIsAdmin(admin);
+      applyMsgs([...(await pollAll(topicI)), ...(await pollAll(topicT))]);
+      setLive("מחובר בזמן אמת 🟢");
+    })();
+    const es1 = new EventSource(`${NTFY}${topicI},${topicT}/sse`);
+    es1.onmessage = (e: MessageEvent) => { try { const m = JSON.parse(e.data) as { message?: string }; if (m.message) applyMsgs([JSON.parse(m.message)]); } catch { /* ignore */ } };
+    es1.onerror = () => setLive("מתחבר מחדש...");
+    return () => { alive = false; es1.close(); };
+  }, []);
+  // keep-alive: republish latest state on open so it survives the 12h relay cache
+  useEffect(() => { if (!TOK) return; const t = setTimeout(() => {
+    if (isAdmin && Object.keys(dec).length) void pub(topicT, { type: "snapshot", all: dec });
+    if (!isAdmin && sub) void pub(topicI, { type: "submit", sub });
+  }, 4000); return () => clearTimeout(t); }, [isAdmin]);
+
   const message = `טל, שיבצתי את עצמי 😎\n${lines.join("\n")}\nשלחתי לך לאישור, תעדכני אותי 😉`;
   const waUrl = `https://wa.me/?text=${encodeURIComponent(message)}`;
   const copy = () => { try { void navigator.clipboard.writeText(message); setCopied(true); setSent(true); } catch { setCopied(false); } };
+
+
+  const items: Item[] = [...FREE.flatMap((d) => picked(d).map((o) => ({ key: `${d.date}:${o}`, line: lineFor(d, o, (sel[d.id] ?? {})[o] ?? {}) }))), ...specials.map((x) => ({ key: `sp:${x.date}:${x.text}`, line: spLine(x) }))];
+  const submitLive = () => { const sb: Sub = { items, at: Date.now() }; setSub(sb); setSent(true); void pub(topicI, { type: "submit", sub: sb }); setToast("נשלח לטל לאישור ✅"); };
+  const decide = (key: string, status: Decision["status"], time?: string, note?: string) => { const dd: Decision = { key, status, time, note, at: Date.now() }; setDec({ ...dec, [key]: dd }); void pub(topicT, { type: "decision", dec: dd }); };
+  const weekSubmitted = !!sub && Date.now() - sub.at < 7 * 86400000;
 
   const reset = { fontFamily: sans, WebkitAppearance: "none" as const, appearance: "none" as const, cursor: "pointer", outline: "none" };
   const shadow = "0 10px 30px rgba(110,31,47,0.10), 0 2px 6px rgba(43,35,38,0.06)";
@@ -211,6 +271,41 @@ function App() {
   const label = { fontSize: 15, fontWeight: 700, letterSpacing: 0.5, color: C.muted };
   const chip = (on: boolean) => ({ ...reset, fontSize: 16, fontWeight: 700, minHeight: 48, borderRadius: 9999, padding: "8px 8px", border: `1.5px solid ${C.wine}`, backgroundImage: on ? WINE : PAPER, color: on ? C.white : C.wine });
   const ls = { display: "flex", alignItems: "center", justifyContent: "center", textDecoration: "none", fontSize: 15, fontWeight: 700, minHeight: 46, borderRadius: 9999, border: `1px solid ${C.gold}`, color: "#5A4520", backgroundImage: GOLDG, padding: "6px" };
+
+  if (isAdmin) {
+    const its = sub ? sub.items : [];
+    const waIdan = `https://wa.me/?text=${encodeURIComponent(`עידן, עניתי לך על ההזמנה 💌 תיכנס לראות: ${PAGE_URL}#k=${TOK}`)}`;
+    return (
+      <div className="tw-root" dir="rtl" lang="he" style={{ colorScheme: "light", backgroundImage: PAGE, backgroundColor: C.ivory, color: C.ink, minHeight: "100vh", width: "100%", fontFamily: sans }}>
+        <style>{CSS}</style>
+        <div style={{ maxWidth: 520, margin: "0 auto", padding: "28px 18px 80px", display: "flex", flexDirection: "column", gap: 18, textAlign: "right" }}>
+          <div className="tw-card" style={{ ...card, padding: 24, textAlign: "center", border: `1px solid ${C.gold}` }}>
+            <div style={{ fontSize: 40 }}>👑</div>
+            <div style={{ fontFamily: SERIF, fontSize: 30, fontWeight: 900, color: C.wine }}>טל, מה עידן בחר</div>
+            <div style={{ fontSize: 15, color: C.muted, marginTop: 6 }}>{live} · {sub ? `נשלח ${new Date(sub.at).toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" })}` : "עוד לא שלח השבוע"}</div>
+          </div>
+          {its.length === 0 ? <div className="tw-card" style={{ ...card, padding: 20, color: C.muted }}>עדיין אין בחירות. ברגע שעידן ישלח, זה יקפוץ כאן לבד.</div> : null}
+          {its.map((it: Item) => { const d0 = dec[it.key]; const e0 = edit[it.key] ?? { time: "", note: "" }; return (
+            <div key={it.key} className="tw-card" style={{ ...card, padding: 18, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 17, fontWeight: 700, color: C.ink }}>{it.line}</div>
+              <div style={{ fontSize: 15, color: C.wine, fontWeight: 700 }}>{STATUS_TXT[d0 ? d0.status : "pending"]}{d0 && d0.time ? ` · ${d0.time}` : ""}{d0 && d0.note ? ` · ${d0.note}` : ""}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <button className="tw-chip on" onClick={() => decide(it.key, "approved")} style={chip(true)}>✅ מאשרת</button>
+                <button className="tw-chip" onClick={() => decide(it.key, "rejected", undefined, e0.note || undefined)} style={chip(false)}>❌ לא מתאים</button>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                <input className="tw-input" type="time" value={e0.time} onChange={(e: { target: { value: string } }) => setEdit({ ...edit, [it.key]: { ...e0, time: e.target.value } })} style={{ fontFamily: sans, fontSize: 16, minHeight: 44, borderRadius: 12, border: `1.5px solid ${C.gold}`, background: "#FFFDF8", color: C.ink, padding: "4px 8px" }} />
+                <button className="tw-chip" disabled={!e0.time} onClick={() => decide(it.key, "time", e0.time, e0.note || undefined)} style={chip(false)}>🕗 שינוי שעה</button>
+              </div>
+              <input className="tw-input" type="text" value={e0.note} placeholder="הצעה נגדית / הערה לעידן" maxLength={80} onChange={(e: { target: { value: string } }) => setEdit({ ...edit, [it.key]: { ...e0, note: e.target.value } })} style={{ fontFamily: sans, fontSize: 16, minHeight: 46, borderRadius: 12, border: `1.5px solid ${C.gold}`, background: "#FFFDF8", color: C.ink, padding: "6px 12px" }} />
+              <button className="tw-chip" disabled={!e0.note} onClick={() => decide(it.key, "counter", e0.time || undefined, e0.note)} style={chip(false)}>🔄 שליחת הצעה נגדית</button>
+            </div>
+          ); })}
+          <a href={waIdan} target="_blank" rel="noopener noreferrer" style={{ display: "block", textAlign: "center", textDecoration: "none", fontSize: 18, fontWeight: 800, padding: "16px 12px", borderRadius: 9999, backgroundImage: WINE, color: C.white }}>💬 להודיע לעידן בוואטסאפ</a>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="tw-root" dir="rtl" lang="he" style={{ colorScheme: "light", backgroundImage: PAGE, backgroundColor: C.ivory, color: C.ink, minHeight: "100vh", width: "100%", fontFamily: sans }}>
@@ -423,10 +518,22 @@ function App() {
             <div style={{ fontSize: 16, color: C.muted }}>עוד לא בחרת כלום. הכפתורים לא נושכים 😉</div>
           )}
           {lines.length > 0 ? <div style={{ fontSize: 15, color: C.muted, textAlign: "center" }}>שום דבר לא סגור עד שטל מאשרת. שולחים לה, והיא חוזרת אליך.</div> : null}
+          {lines.length > 0 && TOK ? (
+            <button className="tw-tile on" onClick={submitLive} style={{ ...reset, fontSize: 19, fontWeight: 800, padding: "17px 12px", borderRadius: 9999, border: "none", backgroundImage: WINE, color: C.white }}>📨 שלח לטל לאישור</button>
+          ) : null}
+          {sub && TOK ? (
+            <div className="tw-sub" style={{ backgroundImage: g("#FFF8EC", "#F8EDDA"), color: C.ink, borderRadius: 18, border: `1px solid ${C.line}`, padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontFamily: SERIF, fontSize: 19, fontWeight: 700, color: C.wine }}>מה טל ענתה {live ? `· ${live}` : ""}</div>
+              {sub.items.map((it: Item) => { const d0 = dec[it.key]; return (
+                <div key={it.key} style={{ fontSize: 15, lineHeight: "23px", color: C.ink }}>{it.line}<br /><b style={{ color: C.wine }}>{STATUS_TXT[d0 ? d0.status : "pending"]}{d0 && d0.time ? ` · ${d0.time}` : ""}{d0 && d0.note ? ` · ״${d0.note}״` : ""}</b></div>
+              ); })}
+            </div>
+          ) : null}
+          {lines.length > 0 ? ( <div style={{ fontSize: 14, color: C.muted, textAlign: "center" }}>{TOK ? "אפשר גם להודיע לה בוואטסאפ:" : ""}</div> ) : null}
           {lines.length > 0 ? (
             <a href={waUrl} target="_blank" rel="noopener noreferrer" onClick={() => setSent(true)}
               style={{ display: "block", textAlign: "center", textDecoration: "none", fontSize: 19, fontWeight: 800, padding: "17px 12px", borderRadius: 9999, backgroundImage: WINE, color: C.white, boxShadow: "0 8px 20px rgba(110,31,47,0.30)" }}>
-              💬 שלח לטל לאישור בוואטסאפ
+              💬 לשלוח גם בוואטסאפ
             </a>
           ) : null}
           {lines.length > 0 ? (
